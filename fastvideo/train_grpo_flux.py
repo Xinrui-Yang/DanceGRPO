@@ -524,10 +524,12 @@ def train_one_step(
         "pooled_prompt_embeds": pooled_prompt_embeds,
     }
     gathered_reward = gather_tensor(samples["rewards"])
+    reward_mean = gathered_reward.mean().item()
+    reward_std = gathered_reward.std().item()
     if dist.get_rank()==0:
         print("gathered_reward", gathered_reward)
         with open('./reward.txt', 'a') as f: 
-            f.write(f"{gathered_reward.mean().item()}\n")
+            f.write(f"{reward_mean}\n")
 
     #计算advantage
     if args.use_group:
@@ -617,7 +619,7 @@ def train_one_step(
             print("advantage", sample["advantages"].item())
             print("final loss", loss.item())
         dist.barrier()
-    return total_loss, grad_norm.item()
+    return total_loss, grad_norm.item(), reward_mean, reward_std
 
 
 def main(args):
@@ -653,7 +655,7 @@ def main(args):
             model_dict = {}
             model, preprocess_train, preprocess_val = create_model_and_transforms(
                 'ViT-H-14',
-                './hps_ckpt/open_clip_pytorch_model.bin',
+                '/share/models/dancegrpo/hps_ckpt/open_clip_pytorch_model.bin',
                 precision='amp',
                 device=device,
                 jit=False,
@@ -677,7 +679,7 @@ def main(args):
         model = model_dict['model']
         preprocess_val = model_dict['preprocess_val']
         #cp = huggingface_hub.hf_hub_download("xswu/HPSv2", hps_version_map["v2.1"])
-        cp = "./hps_ckpt/HPS_v2.1_compressed.pt"
+        cp = "/share/models/dancegrpo/hps_ckpt/HPS_v2.1_compressed.pt"
 
         checkpoint = torch.load(cp, map_location=f'cuda:{device}')
         model.load_state_dict(checkpoint['state_dict'])
@@ -847,7 +849,7 @@ def main(args):
 
 
                 dist.barrier()
-            loss, grad_norm = train_one_step(
+            loss, grad_norm, reward_mean, reward_std = train_one_step(
                 args,
                 device, 
                 transformer,
@@ -882,6 +884,8 @@ def main(args):
                 wandb.log(
                     {
                         "train_loss": loss,
+                        "reward_mean": reward_mean,
+                        "reward_std": reward_std,
                         "learning_rate": lr_scheduler.get_last_lr()[0],
                         "step_time": step_time,
                         "avg_step_time": avg_step_time,

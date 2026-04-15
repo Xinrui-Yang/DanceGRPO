@@ -1,4 +1,4 @@
-GPU_NUM=8 # 2,4,8
+GPU_NUM=4 # 2,4,8
 MODEL_PATH="data/flux"
 OUTPUT_DIR="data/rl_embeddings"
 

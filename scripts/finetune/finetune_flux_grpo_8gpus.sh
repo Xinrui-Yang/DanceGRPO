@@ -1,27 +1,26 @@
-export WANDB_DISABLED=true
+# export WANDB_DISABLED=true
 export WANDB_BASE_URL="https://api.wandb.ai"
 export WANDB_MODE=online
 
 
-mkdir images
+# mkdir images
+
+# apt-get update
+# yes | apt-get install python3-tk
+
+# git clone https://github.com/tgxs002/HPSv2.git
+# cd HPSv2
+# pip install -e . 
+# cd ..
 
 
-sudo apt-get update
-yes | sudo apt-get install python3-tk
-
-git clone https://github.com/tgxs002/HPSv2.git
-cd HPSv2
-pip install -e . 
-cd ..
-
-
-torchrun --nproc_per_node=8 --master_port 19002 \
+torchrun --nproc_per_node=4 --master_port 19002 \
     fastvideo/train_grpo_flux.py \
     --seed 42 \
-    --pretrained_model_name_or_path data/flux \
-    --vae_model_path data/flux \
+    --pretrained_model_name_or_path /share/models/dancegrpo/flux/ \
+    --vae_model_path /share/models/dancegrpo/flux/ \
     --cache_dir data/.cache \
-    --data_json_path data/rl_embeddings/videos2caption.json \
+    --data_json_path /share/models/dancegrpo/flux/rl_embeddings/videos2caption.json \
     --gradient_checkpointing \
     --train_batch_size 2 \
     --num_latent_t 1 \
@@ -55,4 +54,4 @@ torchrun --nproc_per_node=8 --master_port 19002 \
     --adv_clip_max 5.0 \
     --use_ema \
     --ema_decay 0.995 \
-    --init_same_noise \
+    --init_same_noise 2>&1 | tee train.log 

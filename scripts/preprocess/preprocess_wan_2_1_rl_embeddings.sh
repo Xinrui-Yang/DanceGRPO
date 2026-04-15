@@ -1,5 +1,5 @@
-GPU_NUM=8 # 2,4,8
-MODEL_PATH="./data/Wan2.1-T2V-1.3B"
+GPU_NUM=4 # 2,4,8
+MODEL_PATH="/share/models/Wan2.1-T2V-1.3B-Diffusers"
 OUTPUT_DIR="data/rl_embeddings"
 
 pip install diffusers==0.35.0 peft==0.17.0 transformers==4.56.0

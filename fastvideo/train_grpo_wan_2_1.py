@@ -447,10 +447,11 @@ def train_one_step(
         "negative_prompt_embeds": negative_prompt_embeds,
     }
     gathered_reward = gather_tensor(samples["rewards"])
+    reward_mean = gathered_reward.mean().item()
     if dist.get_rank()==0:
         print("gathered_reward", gathered_reward)
-        with open('./reward.txt', 'a') as f: 
-            f.write(f"{gathered_reward.mean().item()}\n")
+        with open(args.reward_log_path, 'a') as f:
+            f.write(f"{reward_mean}\n")
 
     #计算advantage
     if args.use_group:
@@ -528,7 +529,7 @@ def train_one_step(
             dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
             total_loss += avg_loss.item()
         if (i+1)%args.gradient_accumulation_steps==0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(transformer.parameters(), max_norm=max_grad_norm)
+            grad_norm = transformer.clip_grad_norm_(max_grad_norm)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
@@ -538,7 +539,7 @@ def train_one_step(
             print("advantage", sample["advantages"].item())
             print("final loss", loss.item())
         dist.barrier()
-    return total_loss, grad_norm.item()
+    return total_loss, grad_norm.item(), reward_mean
 
 
 def main(args):
@@ -575,7 +576,7 @@ def main(args):
             model_dict = {}
             model, preprocess_train, preprocess_val = create_model_and_transforms(
                 'ViT-H-14',
-                './hps_ckpt/open_clip_pytorch_model.bin',
+                '/share/models/dancegrpo/hps_ckpt/open_clip_pytorch_model.bin',
                 precision='amp',
                 device=device,
                 jit=False,
@@ -599,7 +600,7 @@ def main(args):
         model = model_dict['model']
         preprocess_val = model_dict['preprocess_val']
         #cp = huggingface_hub.hf_hub_download("xswu/HPSv2", hps_version_map["v2.1"])
-        cp = "./hps_ckpt/HPS_v2.1_compressed.pt"
+        cp = "/share/models/dancegrpo/hps_ckpt/HPS_v2.1_compressed.pt"
 
         checkpoint = torch.load(cp, map_location=f'cuda:{device}')
         model.load_state_dict(checkpoint['state_dict'])
@@ -612,28 +613,40 @@ def main(args):
     # keep the master weight to float32
     
     transformer = WanTransformer3DModel.from_pretrained(    
-            args.pretrained_model_name_or_path,
-            subfolder="transformer",
-            torch_dtype = torch.bfloat16
+        args.pretrained_model_name_or_path,
+        subfolder="transformer",
+        torch_dtype = torch.float32 if args.master_weight_type == "fp32" else torch.bfloat16,
     ).to(device)
+
+    main_print(
+        f"  Total training parameters = {sum(p.numel() for p in transformer.parameters() if p.requires_grad) / 1e6} M"
+    )
+    main_print(
+        f"--> Initializing FSDP with sharding strategy: {args.fsdp_sharding_startegy}"
+    )
+    fsdp_kwargs, no_split_modules = get_dit_fsdp_kwargs(
+        transformer,
+        args.fsdp_sharding_startegy,
+        False,
+        args.use_cpu_offload,
+        args.master_weight_type,
+    )
+    # Wan forward queries submodule.parameters() (e.g. time_embedder),
+    # so keep original parameter views when using FSDP.
+    fsdp_kwargs["use_orig_params"] = True
+    transformer = FSDP(transformer, **fsdp_kwargs,)
+    main_print(f"--> model loaded")
 
     if args.gradient_checkpointing:
         apply_fsdp_checkpointing(
-            transformer, (WanTransformerBlock), args.selective_checkpointing
+            transformer, no_split_modules, args.selective_checkpointing
         )
-    
 
     vae = AutoencoderKLWan.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="vae",
         torch_dtype = torch.bfloat16,
     ).to(device)
-
-    main_print(
-        f"--> Initializing FSDP with sharding strategy: {args.fsdp_sharding_startegy}"
-    )
-    # Load the reference model
-    main_print(f"--> model loaded")
 
     # Set model as trainable.
     transformer.train()
@@ -685,6 +698,10 @@ def main(args):
     if rank <= 0:
         project = "wan_2_1"
         wandb.init(project=project, config=args)
+        run_id = wandb.run.id if wandb.run is not None else "no_wandb_run"
+        args.reward_log_path = f"./reward_{run_id}.txt"
+    else:
+        args.reward_log_path = "./reward_rank_nonzero.txt"
 
     # Train!
     total_batch_size = (
@@ -753,7 +770,7 @@ def main(args):
                 dist.barrier()
             if step>args.max_train_steps:
                 break
-            loss, grad_norm = train_one_step(
+            loss, grad_norm, reward_mean = train_one_step(
                 args,
                 device, 
                 transformer,
@@ -791,6 +808,7 @@ def main(args):
                         "step_time": step_time,
                         "avg_step_time": avg_step_time,
                         "grad_norm": grad_norm,
+                        "reward_mean": reward_mean,
                     },
                     step=step,
                 )

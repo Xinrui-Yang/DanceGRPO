@@ -84,7 +84,7 @@ def main(args):
 
     latents_txt_path = args.prompt_dir
     train_dataset = T5dataset(latents_txt_path, args.vae_debug)
-    pipe = WanPipeline.from_pretrained("./data/Wan2.1-T2V-1.3B", torch_dtype=torch.bfloat16).to(device)
+    pipe = WanPipeline.from_pretrained("/share/models/Wan2.1-T2V-1.3B-Diffusers", torch_dtype=torch.bfloat16).to(device)
 
     #vae, autocast_type, fps = load_vae(args.model_type, args.model_path)
     #vae.enable_tiling()
