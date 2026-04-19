@@ -13,9 +13,17 @@ export WANDB_MODE=online
 # pip install -e . 
 # cd ..
 
+# --use_torchtitan_mxfp8 \
+
 LOG_FILE="train_$(date +%Y%m%d_%H%M%S).log"
 
-torchrun --nproc_per_node=4 --master_port 19002 \
+# nsys profile \
+#   --output nsys_mxfp8_on \
+#   --force-overwrite true \
+#   --trace cuda,nvtx,cublas,cudnn,osrt \
+#   --sample none \
+#   --cpuctxsw none \
+torchrun --nproc_per_node=2 --master_port 19002 \
     fastvideo/train_grpo_wan_2_1.py \
     --seed 42 \
     --pretrained_model_name_or_path /share/models/Wan2.1-T2V-1.3B-Diffusers \
@@ -31,6 +39,7 @@ torchrun --nproc_per_node=4 --master_port 19002 \
     --gradient_accumulation_steps 24 \
     --max_train_steps 1000 \
     --learning_rate 2e-6 \
+    --use_torchtitan_mxfp8 \
     --mixed_precision bf16 \
     --checkpointing_steps 1000 \
     --allow_tf32 \

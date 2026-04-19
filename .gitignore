@@ -40,3 +40,7 @@ ENV/
 Thumbs.db
 .idea/
 .vscode/
+
+*.csv
+*.sqlite
+*.nsys-rep

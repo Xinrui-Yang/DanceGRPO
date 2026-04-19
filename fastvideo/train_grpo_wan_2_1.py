@@ -20,7 +20,7 @@ from fastvideo.utils.parallel_states import (
     nccl_info,
 )
 from fastvideo.utils.communications_flux import sp_parallel_dataloader_wrapper
-from fastvideo.utils.validation import log_validation
+# from fastvideo.utils.validation import log_validation
 import time
 from torch.utils.data import DataLoader
 import torch
@@ -64,6 +64,93 @@ from safetensors.torch import save_file
 from diffusers.video_processor import VideoProcessor
 from diffusers.utils import export_to_video
 import json
+
+from torchtitan.config import JobConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from fastvideo.utils.mxfp8_backward_padding import enable_mxfp8_backward_padding_patch
+from typing import Callable, TypeVar
+from functools import wraps
+from torch.utils._pytree import tree_map_only
+
+T = TypeVar("T")
+
+def clone_output_wrapper(f: Callable[..., T]) -> Callable[..., T]:
+    """
+    Clone the CUDA output tensors of a function to avoid in-place operations.
+
+    This wrapper is useful when working with torch.compile to prevent errors
+    related to in-place operations on tensors.
+
+    Args:
+        f: The function whose CUDA tensor outputs should be cloned
+
+    Returns:
+        A wrapped function that clones any CUDA tensor outputs
+    """
+
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        outputs = f(*args, **kwargs)
+        return tree_map_only(
+            torch.Tensor, lambda t: t.clone() if t.is_cuda else t, outputs
+        )
+
+    return wrapped
+
+
+def apply_torch_compile(transformer, torch_compile_mode: str = "default"):
+    """Apply torch.compile to the transformer blocks in-place."""
+    for module in transformer.modules():
+        # 如果这个模块是 Wan 的 Transformer 层
+        if isinstance(module, WanTransformerBlock):
+            # 将它的 forward 替换为编译后的版本
+            module.forward = clone_output_wrapper(
+                torch.compile(module.forward, mode=torch_compile_mode)
+            )
+
+def create_job_config() -> JobConfig:
+    job_config = JobConfig()
+    job_config.model.converters = ["quantize.linear.mx"]
+
+    job_config.parallelism.tensor_parallel_degree = 1
+    job_config.parallelism.context_parallel_degree =1
+    job_config.parallelism.data_parallel_shard_degree = -1
+    job_config.parallelism.data_parallel_replicate_degree = 1
+    job_config.parallelism.fsdp_reshard_after_forward = "always"
+    
+    job_config.quantize.linear.mx.filter_fqns = ["output", "condition_embedder"] # "patch_embedding", "proj_out", "scale_shift_table", "encoder"
+    job_config.quantize.linear.mx.mxfp8_dim1_cast_kernel_choice = "cuda"
+    job_config.quantize.linear.mx.recipe_name = "mxfp8_cublas"
+        
+    return job_config
+
+
+def create_parallel_dims(job_config, world_size: int) -> ParallelDims:
+    return ParallelDims(
+        dp_shard = job_config.parallelism.data_parallel_shard_degree,
+        dp_replicate = job_config.parallelism.data_parallel_replicate_degree,
+        cp = job_config.parallelism.context_parallel_degree,
+        tp = job_config.parallelism.tensor_parallel_degree,
+        pp = job_config.parallelism.pipeline_parallel_degree,
+        ep = job_config.parallelism.expert_parallel_degree,
+        etp = job_config.parallelism.expert_tensor_parallel_degree,
+        world_size = world_size,
+    )
+
+
+def build_torchtitan_mxfp8_converters(transformer, world_size: int):
+    enable_mxfp8_backward_padding_patch()
+    
+    job_config = create_job_config()
+    parallel_dims = create_parallel_dims(job_config, world_size)
+
+    from torchtitan.protocols.model_converter import build_model_converters
+    
+    model_converters = build_model_converters(job_config, parallel_dims)
+    model_converters.convert(transformer)
+
+    return transformer
+
 
 def video_first_frame_to_pil(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -322,7 +409,7 @@ def sample_reference_model(
                 input_latents.clone(),
                 progress_bar,
                 sigma_schedule,
-                transformer,
+                transformer,     
                 batch_encoder_hidden_states,
                 batch_negative_prompt_embeds, 
                 grpo_sample,
@@ -617,6 +704,12 @@ def main(args):
         subfolder="transformer",
         torch_dtype = torch.float32 if args.master_weight_type == "fp32" else torch.bfloat16,
     ).to(device)
+
+    if args.use_torchtitan_mxfp8:
+        main_print("--> Applying TorchTitan MXFP8 converters")
+        transformer = build_torchtitan_mxfp8_converters(transformer, world_size)
+
+    apply_torch_compile(transformer)
 
     main_print(
         f"  Total training parameters = {sum(p.numel() for p in transformer.parameters() if p.requires_grad) / 1e6} M"
@@ -1099,6 +1192,12 @@ if __name__ == "__main__":
         type = float,
         default=5.0,
         help="cfg for training",
+    )
+    parser.add_argument(
+        "--use_torchtitan_mxfp8",
+        action="store_true",
+        default=False,
+        help="Enable TorchTitan MXFP8 quantization for Wan training.",
     )
     
 
