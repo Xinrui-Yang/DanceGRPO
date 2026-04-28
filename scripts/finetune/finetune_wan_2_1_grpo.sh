@@ -1,6 +1,12 @@
 # export WANDB_DISABLED=true
 export WANDB_BASE_URL="https://api.wandb.ai"
 export WANDB_MODE=online
+export WANDB_NAME="bf16-mxfp8-kl0.05-clip0.05-code"
+# Only used when rollout_precision=mxfp4.
+export TORCHAO_MXFP4_GEMM_BACKEND="${TORCHAO_MXFP4_GEMM_BACKEND:-flashinfer}"
+# Only used when rollout_precision=nvfp4.
+export TORCHAO_NVFP4_GEMM_BACKEND="${TORCHAO_NVFP4_GEMM_BACKEND:-cudnn}"
+export DANCEGRPO_NVFP4_CLEAR_CACHE_ON_TRAIN="${DANCEGRPO_NVFP4_CLEAR_CACHE_ON_TRAIN:-1}"
 
 # mkdir videos
 
@@ -15,7 +21,7 @@ export WANDB_MODE=online
 
 # --use_torchtitan_mxfp8 \
 
-LOG_FILE="train_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="log/${WANDB_NAME}.log"
 
 # nsys profile \
 #   --output nsys_mxfp8_on \
@@ -23,7 +29,7 @@ LOG_FILE="train_$(date +%Y%m%d_%H%M%S).log"
 #   --trace cuda,nvtx,cublas,cudnn,osrt \
 #   --sample none \
 #   --cpuctxsw none \
-torchrun --nproc_per_node=2 --master_port 19002 \
+torchrun --nproc_per_node=4 --master_port 19002 \
     fastvideo/train_grpo_wan_2_1.py \
     --seed 42 \
     --pretrained_model_name_or_path /share/models/Wan2.1-T2V-1.3B-Diffusers \
@@ -37,11 +43,17 @@ torchrun --nproc_per_node=2 --master_port 19002 \
     --train_sp_batch_size 2 \
     --dataloader_num_workers 4 \
     --gradient_accumulation_steps 24 \
+    --train_precision bf16 \
+    --rollout_precision mxfp8 \
+    --old_log_prob_source reference \
+    --rollout_correction_mode timestep_tis \
+    --rollout_is_threshold 2.0 \
+    --reference_policy_kl_coef 0.05 \
+    --rollout_is_batch_normalize \
     --max_train_steps 1000 \
     --learning_rate 2e-6 \
-    --use_torchtitan_mxfp8 \
     --mixed_precision bf16 \
-    --checkpointing_steps 1000 \
+    --checkpointing_steps 200 \
     --allow_tf32 \
     --cfg 0.0 \
     --output_dir data/outputs/grpo \
@@ -52,7 +64,7 @@ torchrun --nproc_per_node=2 --master_port 19002 \
     --eta 0.3 \
     --lr_warmup_steps 0 \
     --sampler_seed 1223627 \
-    --max_grad_norm 0.1 \
+    --max_grad_norm 0.01 \
     --weight_decay 0.0001 \
     --use_hpsv2 \
     --num_generations 12 \
@@ -61,6 +73,6 @@ torchrun --nproc_per_node=2 --master_port 19002 \
     --ignore_last \
     --timestep_fraction 0.6 \
     --init_same_noise \
-    --clip_range 0.1 \
+    --clip_range 0.05 \
     --adv_clip_max 5.0 \
     --cfg_infer 5.0 2>&1 | tee "$LOG_FILE"
